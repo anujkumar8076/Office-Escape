@@ -1,0 +1,1534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Office Escape</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#08080f;display:flex;justify-content:center;align-items:center;height:100vh;overflow:hidden;font-family:'Courier New',monospace}
+canvas{display:block;image-rendering:pixelated;cursor:crosshair}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ============================================================
+// OFFICE ESCAPE - Top-Down Escape Room Game
+// ============================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// --- Constants ---
+const T = 32;
+const MW = 45;
+const MH = 30;
+const VW = 800;
+const VH = 600;
+const PS = 18;
+const SPD = 160;
+const IRANGE = 50;
+
+canvas.width = VW;
+canvas.height = VH;
+
+// Offscreen canvas for lighting overlay
+const lightCvs = document.createElement('canvas');
+lightCvs.width = VW;
+lightCvs.height = VH;
+const lctx = lightCvs.getContext('2d');
+
+// --- Color Palette ---
+const C = {
+    floor1:'#2a2a3a', floor2:'#2d2d3d',
+    wallBase:'#181825', wallTop:'#252535', wallEdge:'#333345',
+    desk:'#5c4033', deskHi:'#7a5640', deskEdge:'#3d2a1a',
+    chair:'#4a3728', chairBack:'#5d4535',
+    plantLeaf:'#2d7a27', plantDark:'#1d5a17', pot:'#8b5a2b', potDark:'#6b4020',
+    screen:'#3399aa', screenOff:'#1a3344',
+    cabinet:'#555566', cabDetail:'#444455',
+    shelf:'#5a4a3a', shelfDetail:'#4a3a2a',
+    bookRed:'#aa3333', bookBlue:'#3333aa', bookGreen:'#33aa33', bookYel:'#aa9933',
+    server:'#3a3a4a', srvLight:'#44ff44', srvRed:'#ff4444',
+    vending:'#cc4444', vendDark:'#993333', vendSlot:'#222233',
+    bench:'#6b5b4b', benchLeg:'#4a3a2a',
+    doorClosed:'#886644', doorOpen:'#3a5a4a', doorLocked:'#884444',
+    doorFrame:'#aa8855',
+    keypad:'#2a2a3a', keyBtn:'#3a4a4a', keyBtnHi:'#44ddaa',
+    exitDoor:'#ddaa44', exitGlow:'#ffee88',
+    player:'#44ddaa', playerDark:'#2a9966', playerEye:'#ffffff',
+    itemGlow:'rgba(255,255,200,0.15)',
+    textLight:'#ccccdd', textDim:'#666677', textHi:'#44ddaa',
+    uiBg:'rgba(15,15,28,0.92)', uiBorder:'#3a3a55', uiSlot:'rgba(30,30,50,0.8)',
+    highlight:'#44ddaa', warn:'#dd6644',
+    overlay:'rgba(5,5,15,0.88)',
+    puzzleBg:'rgba(20,20,35,0.95)', puzzleBorder:'#4a4a6a',
+    cardBg:'#2a2a40', cardHi:'#3a3a5a', cardCorrect:'#2a5a3a', cardWrong:'#5a2a2a'
+};
+
+// --- Item Definitions ---
+const ITEM_DEFS = {
+    sticky_note:  { name:'Sticky Note',  color:'#ffff44', desc:'A yellow note with "4821" written on it.' },
+    red_key:      { name:'Red Key',      color:'#dd4444', desc:'A small red key. Fits an old-fashioned lock.' },
+    plant_key:    { name:'Plant Key',    color:'#44aa44', desc:'A green key with a tiny leaf emblem.' },
+    blue_keycard: { name:'Blue Keycard', color:'#4488dd', desc:'A blue keycard. Reads "SERVER ACCESS".' },
+    usb_drive:    { name:'USB Drive',    color:'#dd8844', desc:'A USB drive labeled "MAIN EXIT KEY".' }
+};
+
+// ============================================================
+// SECTION 2: GAME STATE
+// ============================================================
+
+let state = 'title';
+let tileMap = [];
+let doors = [];
+let furniture = [];
+let items = [];
+let interactPts = [];
+let inventory = [];
+let selectedSlot = -1;
+let messages = [];
+let puzzleState = null;
+let particles = [];
+let screenShake = 0;
+let startTime = 0;
+let elapsedTime = 0;
+let nearbyObj = null;
+let promptText = '';
+
+let player = { x:0, y:0, w:PS, h:PS, facing:'down', moving:false };
+let cam = { x:0, y:0 };
+let keys = {};
+let mouse = { x:0, y:0, clicked:false };
+
+// ============================================================
+// SECTION 3: MAP BUILDING
+// ============================================================
+
+function buildMap() {
+    for (let y = 0; y < MH; y++) {
+        tileMap[y] = [];
+        for (let x = 0; x < MW; x++) {
+            tileMap[y][x] = 1;
+        }
+    }
+    var rooms = [
+        [1, 12, 12, 17],
+        [14, 12, 18, 17],
+        [1, 1, 12, 10],
+        [14, 1, 7, 10],
+        [23, 1, 11, 10],
+        [33, 12, 11, 17],
+    ];
+    rooms.forEach(function(r) {
+        for (var dy = 0; dy < r[3]; dy++)
+            for (var dx = 0; dx < r[2]; dx++)
+                tileMap[r[1]+dy][r[0]+dx] = 0;
+    });
+    tileMap[23][13] = 0;
+}
+
+// ============================================================
+// SECTION 4: ENTITY INITIALIZATION
+// ============================================================
+
+function initDoors() {
+    doors = [
+        { x:13, y:23, open:true,  reqItem:null,           name:'Office Door',      lockMsg:'' },
+        { x:7,  y:11, open:false, reqItem:'red_key',      name:'Cabin Door',       lockMsg:'A red keyhole glints in the lock.' },
+        { x:13, y:5,  open:false, reqItem:null,            name:'Secure Door',      lockMsg:'A digital keypad. Enter a 4-digit code.', isKeypad:true },
+        { x:27, y:11, open:false, reqItem:'plant_key',    name:'Storage Door',     lockMsg:'A green keyhole shaped like a leaf.' },
+        { x:32, y:20, open:false, reqItem:'blue_keycard', name:'Card Reader Door', lockMsg:'A keycard reader. It wants a blue card.' },
+    ];
+}
+
+function initFurniture() {
+    furniture = [
+        // Reception
+        { x:3,  y:15, w:5, h:2, type:'desk',    solid:true,  hasComputer:false },
+        { x:5,  y:18, w:1, h:1, type:'chair',   solid:false },
+        { x:2,  y:26, w:2, h:2, type:'cabinet', solid:true  },
+        { x:10, y:24, w:1, h:1, type:'plant',   solid:true,  id:'reception_plant', searched:false },
+        // Open Office
+        { x:16, y:14, w:3, h:2, type:'desk',    solid:true,  hasComputer:true },
+        { x:17, y:17, w:1, h:1, type:'chair',   solid:false },
+        { x:21, y:14, w:3, h:2, type:'desk',    solid:true,  hasComputer:false },
+        { x:22, y:17, w:1, h:1, type:'chair',   solid:false },
+        { x:26, y:14, w:3, h:2, type:'desk',    solid:true,  hasComputer:true },
+        { x:27, y:17, w:1, h:1, type:'chair',   solid:false },
+        { x:16, y:21, w:3, h:2, type:'desk',    solid:true,  hasComputer:false },
+        { x:17, y:24, w:1, h:1, type:'chair',   solid:false },
+        { x:21, y:21, w:3, h:2, type:'desk',    solid:true,  hasComputer:true },
+        { x:22, y:24, w:1, h:1, type:'chair',   solid:false },
+        { x:29, y:25, w:2, h:2, type:'cabinet', solid:true  },
+        // Manager Cabin
+        { x:3,  y:3,  w:6, h:2, type:'desk',    solid:true,  hasComputer:true, id:'manager_desk', searched:false },
+        { x:5,  y:6,  w:1, h:1, type:'chair',   solid:false },
+        { x:2,  y:1,  w:4, h:1, type:'shelf',   solid:true,  hasBooks:true },
+        { x:10, y:1,  w:2, h:3, type:'shelf',   solid:true,  hasBooks:true },
+        { x:1,  y:8,  w:1, h:1, type:'plant',   solid:true  },
+        // Secret Room
+        { x:15, y:1,  w:2, h:4, type:'server',  solid:true  },
+        { x:17, y:5,  w:3, h:2, type:'desk',    solid:true,  hasComputer:true },
+        // Storage Room
+        { x:24, y:2,  w:2, h:3, type:'cabinet', solid:true  },
+        { x:24, y:7,  w:2, h:3, type:'cabinet', solid:true  },
+        { x:31, y:2,  w:2, h:5, type:'shelf',   solid:true,  hasBooks:false },
+        { x:26, y:5,  w:5, h:2, type:'desk',    solid:true,  hasComputer:false, id:'puzzle_desk' },
+        // Exit Corridor
+        { x:34, y:14, w:2, h:3, type:'vending', solid:true  },
+        { x:38, y:20, w:4, h:1, type:'bench',   solid:true  },
+        { x:40, y:25, w:2, h:2, type:'plant',   solid:true  },
+    ];
+}
+
+function initItems() {
+    items = [
+        { id:'sticky_note', x:22*T+16, y:15*T+20, collected:false },
+        { id:'usb_drive',   x:18*T+16, y:6*T+20,  collected:false },
+    ];
+}
+
+function initInteractPoints() {
+    interactPts = [
+        { x:13*T-4,   y:5*T+T/2, type:'keypad', radius:35, doorIdx:2 },
+        { x:38*T+T/2, y:29*T-4,  type:'exit',   radius:48 },
+    ];
+}
+
+// ============================================================
+// SECTION 5: INPUT HANDLING
+// ============================================================
+
+window.addEventListener('keydown', function(e) {
+    keys[e.code] = true;
+    if (state === 'title' && e.code === 'Space') { startGame(); e.preventDefault(); return; }
+    if (state === 'victory' && e.code === 'Space') { startGame(); e.preventDefault(); return; }
+    if (state === 'playing') {
+        if (e.code >= 'Digit1' && e.code <= 'Digit5') {
+            var idx = parseInt(e.code.charAt(5)) - 1;
+            selectedSlot = (selectedSlot === idx && inventory[idx]) ? -1 : idx;
+            if (selectedSlot >= 0 && inventory[selectedSlot]) {
+                addMessage(ITEM_DEFS[inventory[selectedSlot]].desc);
+            }
+            e.preventDefault();
+        }
+        if (e.code === 'Digit0' || e.code === 'Escape') {
+            selectedSlot = -1;
+            e.preventDefault();
+        }
+        if (e.code === 'KeyE') {
+            handleInteraction();
+            e.preventDefault();
+        }
+    }
+    if (state === 'puzzle' && e.code === 'Escape') {
+        puzzleState = null;
+        state = 'playing';
+        e.preventDefault();
+    }
+});
+
+window.addEventListener('keyup', function(e) { keys[e.code] = false; });
+
+canvas.addEventListener('mousedown', function(e) {
+    var rect = canvas.getBoundingClientRect();
+    mouse.x = (e.clientX - rect.left) * (VW / rect.width);
+    mouse.y = (e.clientY - rect.top) * (VH / rect.height);
+    mouse.clicked = true;
+});
+
+canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+function resizeCanvas() {
+    var ratio = VW / VH;
+    var w = window.innerWidth, h = window.innerHeight;
+    if (w / h > ratio) w = h * ratio; else h = w / ratio;
+    canvas.style.width = Math.floor(w) + 'px';
+    canvas.style.height = Math.floor(h) + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ============================================================
+// SECTION 6: UTILITY FUNCTIONS
+// ============================================================
+
+function clamp(v, mn, mx) { return Math.max(mn, Math.min(mx, v)); }
+function dist(x1, y1, x2, y2) { return Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1)); }
+function rectsOverlap(a, b) {
+    return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+function hasItem(id) { return inventory.indexOf(id) !== -1; }
+function addItem(id) {
+    if (inventory.length < 5 && !hasItem(id)) {
+        inventory.push(id);
+        return true;
+    }
+    return false;
+}
+function removeItemAt(idx) {
+    if (idx >= 0 && idx < inventory.length) inventory.splice(idx, 1);
+}
+function addMessage(text) {
+    messages.push(text);
+    if (messages.length > 4) messages.shift();
+}
+function getRoomName(tx, ty) {
+    if (tx>=1&&tx<=12&&ty>=12&&ty<=28) return 'Reception';
+    if (tx>=14&&tx<=31&&ty>=12&&ty<=28) return 'Open Office';
+    if (tx>=1&&tx<=12&&ty>=1&&ty<=10) return 'Manager Cabin';
+    if (tx>=14&&tx<=20&&ty>=1&&ty<=10) return 'Secret Room';
+    if (tx>=23&&tx<=33&&ty>=1&&ty<=10) return 'Storage Room';
+    if (tx>=33&&tx<=43&&ty>=12&&ty<=28) return 'Exit Corridor';
+    return '';
+}
+function getDoorAt(tx, ty) {
+    for (var i = 0; i < doors.length; i++) {
+        if (doors[i].x === tx && doors[i].y === ty) return doors[i];
+    }
+    return null;
+}
+
+// ============================================================
+// SECTION 7: COLLISION DETECTION
+// ============================================================
+
+function checkCollision(ent) {
+    var l = Math.floor(ent.x / T);
+    var r = Math.floor((ent.x + ent.w - 1) / T);
+    var t = Math.floor(ent.y / T);
+    var b = Math.floor((ent.y + ent.h - 1) / T);
+    for (var ty = t; ty <= b; ty++) {
+        for (var tx = l; tx <= r; tx++) {
+            if (tx < 0 || tx >= MW || ty < 0 || ty >= MH) return true;
+            if (tileMap[ty][tx] === 1) return true;
+        }
+    }
+    for (var i = 0; i < furniture.length; i++) {
+        var f = furniture[i];
+        if (!f.solid) continue;
+        var fb = { x:f.x*T, y:f.y*T, w:f.w*T, h:f.h*T };
+        if (rectsOverlap(ent, fb)) return true;
+    }
+    return false;
+}
+
+// ============================================================
+// SECTION 8: PLAYER MOVEMENT
+// ============================================================
+
+function updatePlayer(dt) {
+    var dx = 0, dy = 0;
+    if (keys['KeyW'] || keys['ArrowUp'])    dy -= 1;
+    if (keys['KeyS'] || keys['ArrowDown'])  dy += 1;
+    if (keys['KeyA'] || keys['ArrowLeft'])  dx -= 1;
+    if (keys['KeyD'] || keys['ArrowRight']) dx += 1;
+
+    if (dx !== 0 && dy !== 0) {
+        var inv = 1 / Math.sqrt(2);
+        dx *= inv; dy *= inv;
+    }
+
+    var moveX = dx * SPD * dt;
+    var moveY = dy * SPD * dt;
+    player.moving = (dx !== 0 || dy !== 0);
+
+    if (dy < 0) player.facing = 'up';
+    else if (dy > 0) player.facing = 'down';
+    if (dx < 0) player.facing = 'left';
+    else if (dx > 0) player.facing = 'right';
+
+    if (moveX !== 0) {
+        player.x += moveX;
+        if (checkCollision(player)) player.x -= moveX;
+    }
+    if (moveY !== 0) {
+        player.y += moveY;
+        if (checkCollision(player)) player.y -= moveY;
+    }
+
+    if (player.moving && Math.random() < 0.3) {
+        particles.push({
+            x: player.x + player.w/2 + (Math.random()-0.5)*8,
+            y: player.y + player.h - 2,
+            life: 0.4, maxLife: 0.4, size: 2
+        });
+    }
+}
+
+// ============================================================
+// SECTION 9: INTERACTION SYSTEM
+// ============================================================
+
+function findNearby() {
+    var px = player.x + player.w/2;
+    var py = player.y + player.h/2;
+    var best = null, bestDist = IRANGE;
+
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (it.collected) continue;
+        var d = dist(px, py, it.x, it.y);
+        if (d < bestDist) { bestDist = d; best = { type:'item', data:it }; }
+    }
+    for (var i = 0; i < furniture.length; i++) {
+        var f = furniture[i];
+        if (!f.id) continue;
+        var fx = f.x*T + f.w*T/2, fy = f.y*T + f.h*T/2;
+        var d = dist(px, py, fx, fy);
+        var effectiveRange = IRANGE + Math.max(f.w, f.h) * T * 0.4;
+        if (d < effectiveRange && d < bestDist) { bestDist = d; best = { type:'furniture', data:f }; }
+    }
+    for (var i = 0; i < doors.length; i++) {
+        var door = doors[i];
+        if (door.open) continue;
+        var ddx = door.x*T + T/2, ddy = door.y*T + T/2;
+        var dd = dist(px, py, ddx, ddy);
+        if (dd < bestDist) { bestDist = dd; best = { type:'door', data:door }; }
+    }
+    for (var i = 0; i < interactPts.length; i++) {
+        var ip = interactPts[i];
+        var d = dist(px, py, ip.x, ip.y);
+        if (d < ip.radius && d < bestDist) { bestDist = d; best = { type:'interactPt', data:ip }; }
+    }
+    return best;
+}
+
+function handleInteraction() {
+    if (!nearbyObj) {
+        if (selectedSlot >= 0 && inventory[selectedSlot]) {
+            addMessage(ITEM_DEFS[inventory[selectedSlot]].desc);
+        }
+        return;
+    }
+    var obj = nearbyObj;
+
+    if (obj.type === 'item') {
+        var it = obj.data;
+        if (addItem(it.id)) {
+            it.collected = true;
+            addMessage('Picked up: ' + ITEM_DEFS[it.id].name);
+            selectedSlot = inventory.length - 1;
+        } else {
+            addMessage('Inventory full!');
+        }
+    }
+    else if (obj.type === 'door') {
+        var door = obj.data;
+        if (door.isKeypad) {
+            addMessage(door.lockMsg);
+        } else if (door.reqItem) {
+            if (selectedSlot >= 0 && inventory[selectedSlot] === door.reqItem) {
+                door.open = true;
+                tileMap[door.y][door.x] = 0;
+                removeItemAt(selectedSlot);
+                selectedSlot = -1;
+                screenShake = 0.15;
+                addMessage('Unlocked the ' + door.name + '!');
+            } else if (selectedSlot >= 0) {
+                addMessage("That does not fit this lock.");
+            } else {
+                addMessage(door.lockMsg);
+            }
+        }
+    }
+    else if (obj.type === 'furniture') {
+        var f = obj.data;
+        if (f.id === 'reception_plant') {
+            if (!f.searched) {
+                f.searched = true;
+                addItem('red_key');
+                selectedSlot = inventory.indexOf('red_key');
+                addMessage('You searched under the plant and found a Red Key!');
+            } else {
+                addMessage('Just a potted plant. Nothing else here.');
+            }
+        }
+        else if (f.id === 'manager_desk') {
+            if (!f.searched) {
+                f.searched = true;
+                addItem('plant_key');
+                selectedSlot = inventory.indexOf('plant_key');
+                addMessage('You opened the drawer and found a Plant Key!');
+            } else {
+                addMessage('The desk drawer is empty now.');
+            }
+        }
+        else if (f.id === 'puzzle_desk') {
+            if (!hasItem('blue_keycard')) {
+                openPaperPuzzle();
+            } else {
+                addMessage('The desk is orderly now.');
+            }
+        }
+    }
+    else if (obj.type === 'interactPt') {
+        var ip = obj.data;
+        if (ip.type === 'keypad') {
+            openKeypadPuzzle(ip.doorIdx);
+        }
+        else if (ip.type === 'exit') {
+            if (selectedSlot >= 0 && inventory[selectedSlot] === 'usb_drive') {
+                elapsedTime = ((Date.now() - startTime) / 1000);
+                state = 'victory';
+            } else if (selectedSlot >= 0) {
+                addMessage('The exit requires the USB Drive.');
+            } else {
+                addMessage('A heavy exit door with a USB port. You need the right key.');
+            }
+        }
+    }
+}
+
+function handleMouseClick() {
+    if (state === 'puzzle') {
+        handlePuzzleClick();
+        return;
+    }
+    if (state === 'playing') {
+        var invY = VH - 78;
+        var invW = 5 * 68 - 8;
+        var invX = (VW - invW) / 2;
+        for (var i = 0; i < 5; i++) {
+            var sx = invX + i * 68;
+            if (mouse.x >= sx && mouse.x <= sx + 60 && mouse.y >= invY && mouse.y <= invY + 60) {
+                if (inventory[i]) {
+                    selectedSlot = (selectedSlot === i) ? -1 : i;
+                    if (selectedSlot >= 0) addMessage(ITEM_DEFS[inventory[selectedSlot]].desc);
+                }
+                return;
+            }
+        }
+        handleInteraction();
+    }
+}
+
+// ============================================================
+// SECTION 10: PUZZLE SYSTEMS
+// ============================================================
+
+function openKeypadPuzzle(doorIdx) {
+    puzzleState = {
+        type: 'keypad',
+        input: '',
+        targetCode: '4821',
+        doorIdx: doorIdx,
+        error: false,
+        errorTimer: 0
+    };
+    state = 'puzzle';
+}
+
+function openPaperPuzzle() {
+    var shuffled = [0, 1, 2, 3];
+    for (var i = shuffled.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var tmp = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = tmp;
+    }
+    if (shuffled[0]===0 && shuffled[1]===1 && shuffled[2]===2 && shuffled[3]===3) {
+        var tmp = shuffled[0]; shuffled[0] = shuffled[3]; shuffled[3] = tmp;
+    }
+    puzzleState = {
+        type: 'papers',
+        order: shuffled,
+        clicked: [],
+        solved: false,
+        error: false,
+        errorTimer: 0
+    };
+    state = 'puzzle';
+}
+
+function handlePuzzleClick() {
+    if (!puzzleState) return;
+    if (puzzleState.type === 'keypad') handleKeypadClick();
+    else if (puzzleState.type === 'papers') handlePaperClick();
+}
+
+function handleKeypadClick() {
+    var p = puzzleState;
+    var ox = (VW - 270) / 2;
+    var oy = (VH - 380) / 2;
+    var bw = 70, bh = 55, gap = 10;
+    var startX = ox + 20, startY = oy + 90;
+
+    for (var row = 0; row < 4; row++) {
+        for (var col = 0; col < 3; col++) {
+            var bx = startX + col * (bw + gap);
+            var by = startY + row * (bh + gap);
+            if (mouse.x >= bx && mouse.x <= bx + bw && mouse.y >= by && mouse.y <= by + bh) {
+                var idx = row * 3 + col;
+                if (idx === 9) {
+                    p.input = '';
+                    p.error = false;
+                } else if (idx === 11) {
+                    if (p.input.length === 4) {
+                        if (p.input === p.targetCode) {
+                            var door = doors[p.doorIdx];
+                            door.open = true;
+                            tileMap[door.y][door.x] = 0;
+                            screenShake = 0.2;
+                            addMessage('Access granted! The Secure Door opened.');
+                            puzzleState = null;
+                            state = 'playing';
+                        } else {
+                            p.error = true;
+                            p.errorTimer = 1.0;
+                            p.input = '';
+                        }
+                    }
+                } else {
+                    var digit = idx + 1;
+                    if (idx === 10) digit = 0;
+                    if (p.input.length < 4) {
+                        p.input += digit.toString();
+                        p.error = false;
+                    }
+                }
+                return;
+            }
+        }
+    }
+}
+
+function handlePaperClick() {
+    var p = puzzleState;
+    if (p.solved) {
+        puzzleState = null;
+        state = 'playing';
+        return;
+    }
+    var ox = (VW - 400) / 2;
+    var oy = (VH - 320) / 2;
+    var cw = 170, ch = 100, gp = 20;
+    var startX = ox + (400 - 2*cw - gp) / 2;
+    var startY = oy + 70;
+
+    for (var i = 0; i < 4; i++) {
+        var col = i % 2, row = Math.floor(i / 2);
+        var cx = startX + col * (cw + gp);
+        var cy = startY + row * (ch + gp);
+        if (mouse.x >= cx && mouse.x <= cx + cw && mouse.y >= cy && mouse.y <= cy + ch) {
+            var pageNum = p.order[i] + 1;
+            var expectedNext = p.clicked.length + 1;
+            if (pageNum === expectedNext) {
+                p.clicked.push(pageNum);
+                if (p.clicked.length === 4) {
+                    p.solved = true;
+                    addItem('blue_keycard');
+                    selectedSlot = inventory.indexOf('blue_keycard');
+                    addMessage('Documents sorted! A Blue Keycard appeared!');
+                }
+            } else {
+                p.clicked = [];
+                p.error = true;
+                p.errorTimer = 0.8;
+            }
+            return;
+        }
+    }
+}
+
+// ============================================================
+// SECTION 11: CAMERA
+// ============================================================
+
+function updateCamera() {
+    var targetX = player.x + player.w/2 - VW/2;
+    var targetY = player.y + player.h/2 - VH/2;
+    cam.x = clamp(targetX, 0, MW*T - VW);
+    cam.y = clamp(targetY, 0, MH*T - VH);
+}
+
+// ============================================================
+// SECTION 12: RENDER - MAP
+// ============================================================
+
+function renderMap() {
+    var startTX = Math.max(0, Math.floor(cam.x / T));
+    var startTY = Math.max(0, Math.floor(cam.y / T));
+    var endTX = Math.min(MW - 1, Math.ceil((cam.x + VW) / T));
+    var endTY = Math.min(MH - 1, Math.ceil((cam.y + VH) / T));
+
+    for (var ty = startTY; ty <= endTY; ty++) {
+        for (var tx = startTX; tx <= endTX; tx++) {
+            var sx = tx * T - cam.x;
+            var sy = ty * T - cam.y;
+            var door = getDoorAt(tx, ty);
+
+            if (tileMap[ty][tx] === 0) {
+                ctx.fillStyle = (tx + ty) % 2 === 0 ? C.floor1 : C.floor2;
+                ctx.fillRect(sx, sy, T, T);
+            } else if (door && door.open) {
+                ctx.fillStyle = (tx + ty) % 2 === 0 ? C.floor1 : C.floor2;
+                ctx.fillRect(sx, sy, T, T);
+                ctx.strokeStyle = C.doorFrame;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(sx + 2, sy + 2, T - 4, T - 4);
+            } else if (door && !door.open) {
+                ctx.fillStyle = door.isKeypad ? C.doorLocked : C.doorClosed;
+                ctx.fillRect(sx, sy, T, T);
+                ctx.strokeStyle = C.doorFrame;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(sx + 1, sy + 1, T - 2, T - 2);
+                if (door.isKeypad) {
+                    ctx.fillStyle = '#222233';
+                    ctx.fillRect(sx + 10, sy + 10, 12, 8);
+                    ctx.fillStyle = C.keyBtnHi;
+                    ctx.fillRect(sx + 12, sy + 12, 2, 2);
+                    ctx.fillRect(sx + 16, sy + 12, 2, 2);
+                    ctx.fillRect(sx + 12, sy + 15, 2, 2);
+                } else {
+                    ctx.fillStyle = '#222233';
+                    ctx.beginPath();
+                    ctx.arc(sx + T/2, sy + T/2 + 4, 3, 0, Math.PI*2);
+                    ctx.fill();
+                }
+            } else {
+                ctx.fillStyle = C.wallBase;
+                ctx.fillRect(sx, sy, T, T);
+                ctx.fillStyle = C.wallTop;
+                ctx.fillRect(sx, sy, T, T * 0.4);
+                ctx.fillStyle = C.wallEdge;
+                ctx.fillRect(sx, sy + T * 0.4, T, 1);
+            }
+        }
+    }
+}
+
+// ============================================================
+// SECTION 13: RENDER - ENTITIES
+// ============================================================
+
+function renderFurniture() {
+    for (var i = 0; i < furniture.length; i++) {
+        var f = furniture[i];
+        var sx = f.x * T - cam.x;
+        var sy = f.y * T - cam.y;
+        var fw = f.w * T, fh = f.h * T;
+
+        if (sx + fw < 0 || sx > VW || sy + fh < 0 || sy > VH) continue;
+
+        if (f.type === 'desk')    drawDesk(sx, sy, fw, fh, f.hasComputer);
+        if (f.type === 'chair')   drawChair(sx, sy, fw, fh);
+        if (f.type === 'plant')   drawPlant(sx, sy, fw, fh);
+        if (f.type === 'cabinet') drawCabinet(sx, sy, fw, fh);
+        if (f.type === 'shelf')   drawShelf(sx, sy, fw, fh, f.hasBooks);
+        if (f.type === 'server')  drawServer(sx, sy, fw, fh);
+        if (f.type === 'vending') drawVending(sx, sy, fw, fh);
+        if (f.type === 'bench')   drawBench(sx, sy, fw, fh);
+
+        if (f.id && f.id !== 'puzzle_desk' && !f.searched) {
+            ctx.fillStyle = 'rgba(68,221,170,0.08)';
+            ctx.fillRect(sx - 2, sy - 2, fw + 4, fh + 4);
+        }
+        if (f.id === 'puzzle_desk' && !hasItem('blue_keycard')) {
+            ctx.fillStyle = 'rgba(68,221,170,0.08)';
+            ctx.fillRect(sx - 2, sy - 2, fw + 4, fh + 4);
+        }
+    }
+}
+
+function drawDesk(x, y, w, h, hasComp) {
+    ctx.fillStyle = C.desk;
+    ctx.fillRect(x + 2, y + 4, w - 4, h - 4);
+    ctx.fillStyle = C.deskHi;
+    ctx.fillRect(x + 2, y + 4, w - 4, 5);
+    ctx.strokeStyle = C.deskEdge;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 2, y + 4, w - 4, h - 4);
+    ctx.fillStyle = C.deskEdge;
+    ctx.fillRect(x + 4, y + h - 4, 3, 4);
+    ctx.fillRect(x + w - 7, y + h - 4, 3, 4);
+    if (hasComp) {
+        var cx = x + w/2 - 8, cy = y + 8;
+        ctx.fillStyle = '#222233';
+        ctx.fillRect(cx, cy, 16, 12);
+        ctx.fillStyle = C.screen;
+        ctx.fillRect(cx + 1, cy + 1, 14, 10);
+        ctx.fillStyle = 'rgba(51,153,170,0.1)';
+        ctx.beginPath();
+        ctx.arc(cx + 8, cy + 6, 14, 0, Math.PI*2);
+        ctx.fill();
+    }
+}
+
+function drawChair(x, y, w, h) {
+    ctx.fillStyle = C.chair;
+    ctx.fillRect(x + 4, y + 6, w - 8, h - 6);
+    ctx.fillStyle = C.chairBack;
+    ctx.fillRect(x + 4, y, w - 8, 8);
+    ctx.strokeStyle = C.deskEdge;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 4, y, w - 8, h);
+}
+
+function drawPlant(x, y, w, h) {
+    ctx.fillStyle = C.pot;
+    ctx.fillRect(x + 6, y + h/2, w - 12, h/2);
+    ctx.fillStyle = C.potDark;
+    ctx.fillRect(x + 4, y + h/2 - 2, w - 8, 4);
+    ctx.fillStyle = C.plantLeaf;
+    ctx.beginPath();
+    ctx.arc(x + w/2, y + h/2 - 4, w/2 - 4, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = C.plantDark;
+    ctx.beginPath();
+    ctx.arc(x + w/2 - 3, y + h/2 - 6, w/3 - 2, 0, Math.PI*2);
+    ctx.fill();
+}
+
+function drawCabinet(x, y, w, h) {
+    ctx.fillStyle = C.cabinet;
+    ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+    ctx.strokeStyle = C.cabDetail;
+    ctx.lineWidth = 1;
+    var drawers = Math.floor(h / T);
+    for (var i = 1; i < drawers; i++) {
+        ctx.beginPath();
+        ctx.moveTo(x + 3, y + i * T);
+        ctx.lineTo(x + w - 3, y + i * T);
+        ctx.stroke();
+    }
+    for (var i = 0; i < drawers; i++) {
+        ctx.fillStyle = '#777788';
+        ctx.fillRect(x + w/2 - 4, y + i*T + T/2 - 1, 8, 2);
+    }
+    ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+}
+
+function drawShelf(x, y, w, h, hasBooks) {
+    ctx.fillStyle = C.shelf;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = C.shelfDetail;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, w, h);
+    var rows = Math.floor(h / T);
+    for (var i = 1; i < rows; i++) {
+        ctx.beginPath();
+        ctx.moveTo(x, y + i * T);
+        ctx.lineTo(x + w, y + i * T);
+        ctx.stroke();
+    }
+    if (hasBooks) {
+        var bookColors = [C.bookRed, C.bookBlue, C.bookGreen, C.bookYel];
+        for (var row = 0; row < rows; row++) {
+            var bx = x + 2;
+            var by = y + row * T + 2;
+            var bh = T - 5;
+            for (var b = 0; b < 5 && bx + 6 < x + w - 2; b++) {
+                var bw = 4 + Math.floor(Math.sin((row*5+b)*1.7)*2);
+                ctx.fillStyle = bookColors[(row*5+b) % bookColors.length];
+                ctx.fillRect(bx, by, bw, bh);
+                bx += bw + 1;
+            }
+        }
+    }
+}
+
+function drawServer(x, y, w, h) {
+    ctx.fillStyle = C.server;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#2a2a3a';
+    ctx.lineWidth = 1;
+    var units = Math.floor(h / (T/2));
+    for (var i = 1; i < units; i++) {
+        var ly = y + i * (h / units);
+        ctx.beginPath();
+        ctx.moveTo(x + 2, ly);
+        ctx.lineTo(x + w - 2, ly);
+        ctx.stroke();
+    }
+    var time = Date.now() / 1000;
+    for (var i = 0; i < units; i++) {
+        var ly = y + i * (h / units) + (h / units) / 2;
+        var blink = Math.sin(time * 2 + i * 1.5) > 0;
+        ctx.fillStyle = blink ? C.srvLight : C.srvRed;
+        ctx.fillRect(x + w - 8, ly - 1, 3, 3);
+        ctx.fillStyle = blink ? C.srvRed : C.srvLight;
+        ctx.fillRect(x + w - 14, ly - 1, 3, 3);
+    }
+    ctx.strokeRect(x, y, w, h);
+}
+
+function drawVending(x, y, w, h) {
+    ctx.fillStyle = C.vending;
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = C.vendDark;
+    ctx.fillRect(x + 3, y + 3, w - 6, h * 0.6);
+    ctx.fillStyle = C.vendSlot;
+    for (var row = 0; row < 3; row++) {
+        for (var col = 0; col < 2; col++) {
+            ctx.fillRect(x + 5 + col * (w/2 - 2), y + 5 + row * ((h*0.6-6)/3), w/2 - 6, (h*0.6-8)/3);
+        }
+    }
+    ctx.fillStyle = '#ffdddd';
+    ctx.font = '7px monospace';
+    ctx.fillText('SNACK', x + 5, y + h - 6);
+    ctx.strokeStyle = '#882222';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, w, h);
+}
+
+function drawBench(x, y, w, h) {
+    ctx.fillStyle = C.bench;
+    ctx.fillRect(x, y + 4, w, h - 4);
+    ctx.fillStyle = C.benchLeg;
+    ctx.fillRect(x + 2, y, 4, h);
+    ctx.fillRect(x + w - 6, y, 4, h);
+    ctx.strokeStyle = C.benchLeg;
+    ctx.lineWidth = 1;
+    for (var i = 1; i < 4; i++) {
+        var lx = x + i * (w / 4);
+        ctx.beginPath(); ctx.moveTo(lx, y + 4); ctx.lineTo(lx, y + h); ctx.stroke();
+    }
+}
+
+function renderItems() {
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (it.collected) continue;
+        var sx = it.x - cam.x, sy = it.y - cam.y;
+        if (sx < -20 || sx > VW+20 || sy < -20 || sy > VH+20) continue;
+        ctx.fillStyle = C.itemGlow;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 16, 0, Math.PI*2);
+        ctx.fill();
+        var def = ITEM_DEFS[it.id];
+        drawItemIcon(sx, sy, it.id, def.color, 1.0);
+    }
+}
+
+function drawItemIcon(x, y, id, color, scale) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(scale, scale);
+    if (id === 'sticky_note') {
+        ctx.fillStyle = color;
+        ctx.fillRect(-7, -7, 14, 14);
+        ctx.fillStyle = '#cccc33';
+        ctx.fillRect(-7, -7, 14, 3);
+        ctx.fillStyle = '#888833';
+        ctx.fillRect(-4, -1, 8, 1);
+        ctx.fillRect(-4, 2, 6, 1);
+        ctx.fillRect(-4, 5, 7, 1);
+    } else if (id === 'red_key' || id === 'plant_key') {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(-3, -3, 4, 0, Math.PI*2);
+        ctx.fill();
+        ctx.fillRect(-1, -1, 10, 3);
+        ctx.fillRect(6, -1, 2, 5);
+        ctx.fillRect(3, -1, 2, 4);
+    } else if (id === 'blue_keycard') {
+        ctx.fillStyle = color;
+        ctx.fillRect(-8, -5, 16, 10);
+        ctx.fillStyle = '#336699';
+        ctx.fillRect(-6, -3, 12, 6);
+        ctx.fillStyle = '#88bbff';
+        ctx.fillRect(-6, -1, 12, 2);
+    } else if (id === 'usb_drive') {
+        ctx.fillStyle = color;
+        ctx.fillRect(-6, -4, 12, 8);
+        ctx.fillStyle = '#aa6622';
+        ctx.fillRect(-8, -2, 3, 4);
+        ctx.fillStyle = '#ffeecc';
+        ctx.fillRect(-2, -2, 4, 1);
+    }
+    ctx.restore();
+}
+
+function renderInteractPoints() {
+    for (var i = 0; i < interactPts.length; i++) {
+        var ip = interactPts[i];
+        var sx = ip.x - cam.x, sy = ip.y - cam.y;
+        if (sx < -30 || sx > VW+30 || sy < -30 || sy > VH+30) continue;
+
+        if (ip.type === 'keypad') {
+            ctx.fillStyle = C.keypad;
+            ctx.fillRect(sx - 8, sy - 14, 16, 28);
+            ctx.strokeStyle = '#4a4a5a';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(sx - 8, sy - 14, 16, 28);
+            ctx.fillStyle = '#112233';
+            ctx.fillRect(sx - 5, sy - 10, 10, 6);
+            var blink = Math.sin(Date.now()/500) > 0;
+            ctx.fillStyle = blink ? C.keyBtnHi : '#224444';
+            ctx.fillRect(sx - 2, sy - 8, 4, 2);
+        } else if (ip.type === 'exit') {
+            var ex = sx - T/2, ey = sy - 8;
+            ctx.fillStyle = C.exitDoor;
+            ctx.fillRect(ex, ey, T, 12);
+            ctx.strokeStyle = '#bb8822';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(ex, ey, T, 12);
+            ctx.fillStyle = '#332200';
+            ctx.font = 'bold 8px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('EXIT', sx, ey + 8);
+            ctx.textAlign = 'left';
+            ctx.fillStyle = 'rgba(255,238,136,0.06)';
+            ctx.beginPath();
+            ctx.arc(sx, sy, 30, 0, Math.PI*2);
+            ctx.fill();
+        }
+    }
+}
+
+function renderPlayer() {
+    var sx = player.x - cam.x;
+    var sy = player.y - cam.y;
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    ctx.ellipse(sx + PS/2, sy + PS + 1, PS/2 - 1, 3, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = C.player;
+    ctx.fillRect(sx + 1, sy + 1, PS - 2, PS - 2);
+    ctx.fillStyle = C.playerDark;
+    ctx.fillRect(sx + 3, sy + 3, PS - 6, PS - 6);
+    ctx.fillStyle = C.player;
+    var fx = sx + PS/2 - 2, fy = sy + PS/2 - 2;
+    if (player.facing === 'up')    fy = sy + 1;
+    if (player.facing === 'down')  fy = sy + PS - 5;
+    if (player.facing === 'left')  fx = sx + 1;
+    if (player.facing === 'right') fx = sx + PS - 5;
+    ctx.fillRect(fx, fy, 4, 4);
+    ctx.fillStyle = C.playerEye;
+    ctx.fillRect(fx + 1, fy + 1, 2, 2);
+}
+
+function renderParticles() {
+    for (var i = 0; i < particles.length; i++) {
+        var p = particles[i];
+        var alpha = (p.life / p.maxLife) * 0.25;
+        ctx.fillStyle = 'rgba(120,120,150,' + alpha + ')';
+        ctx.fillRect(p.x - cam.x - p.size/2, p.y - cam.y - p.size/2, p.size, p.size);
+    }
+}
+
+// ============================================================
+// SECTION 14: RENDER - LIGHTING
+// ============================================================
+
+function renderLighting() {
+    lctx.globalCompositeOperation = 'source-over';
+    lctx.fillStyle = 'rgba(5,5,15,0.78)';
+    lctx.fillRect(0, 0, VW, VH);
+
+    lctx.globalCompositeOperation = 'destination-out';
+    var px = player.x + player.w/2 - cam.x;
+    var py = player.y + player.h/2 - cam.y;
+    var grad = lctx.createRadialGradient(px, py, 0, px, py, 190);
+    grad.addColorStop(0, 'rgba(0,0,0,1)');
+    grad.addColorStop(0.4, 'rgba(0,0,0,0.8)');
+    grad.addColorStop(0.7, 'rgba(0,0,0,0.3)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    lctx.fillStyle = grad;
+    lctx.beginPath();
+    lctx.arc(px, py, 190, 0, Math.PI*2);
+    lctx.fill();
+
+    lctx.globalCompositeOperation = 'source-atop';
+    lctx.fillStyle = 'rgba(30,20,10,0.15)';
+    lctx.beginPath();
+    lctx.arc(px, py, 120, 0, Math.PI*2);
+    lctx.fill();
+
+    var screens = [
+        { x: 16*T+T/2, y: 14*T+12, r: 50 },
+        { x: 26*T+T/2, y: 14*T+12, r: 50 },
+        { x: 21*T+T/2, y: 21*T+12, r: 50 },
+        { x: 5*T+T/2,  y: 3*T+12,  r: 50 },
+        { x: 18*T+T/2, y: 5*T+12,  r: 50 },
+    ];
+    for (var i = 0; i < screens.length; i++) {
+        var s = screens[i];
+        var ssx = s.x - cam.x, ssy = s.y - cam.y;
+        lctx.globalCompositeOperation = 'destination-out';
+        var sg = lctx.createRadialGradient(ssx, ssy, 0, ssx, ssy, s.r);
+        sg.addColorStop(0, 'rgba(0,0,0,0.3)');
+        sg.addColorStop(1, 'rgba(0,0,0,0)');
+        lctx.fillStyle = sg;
+        lctx.beginPath();
+        lctx.arc(ssx, ssy, s.r, 0, Math.PI*2);
+        lctx.fill();
+    }
+    lctx.globalCompositeOperation = 'source-over';
+    ctx.drawImage(lightCvs, 0, 0);
+}
+
+// ============================================================
+// SECTION 15: RENDER - UI
+// ============================================================
+
+function renderUI() {
+    var ptx = Math.floor((player.x + player.w/2) / T);
+    var pty = Math.floor((player.y + player.h/2) / T);
+    var roomName = getRoomName(ptx, pty);
+    if (roomName) {
+        ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(15,15,28,0.7)';
+        var tw = ctx.measureText(roomName).width;
+        ctx.fillRect(VW/2 - tw/2 - 10, 6, tw + 20, 22);
+        ctx.fillStyle = '#8888aa';
+        ctx.fillText(roomName, VW/2, 22);
+        ctx.textAlign = 'left';
+    }
+
+    renderMinimap();
+    renderMessages();
+    renderInventory();
+
+    if (nearbyObj && state === 'playing') {
+        ctx.font = '13px monospace';
+        ctx.textAlign = 'center';
+        var txt = 'Press E to interact';
+        if (nearbyObj.type === 'item') {
+            txt = 'Press E to pick up ' + ITEM_DEFS[nearbyObj.data.id].name;
+        }
+        var tw = ctx.measureText(txt).width;
+        ctx.fillStyle = 'rgba(15,15,28,0.8)';
+        ctx.fillRect(VW/2 - tw/2 - 12, VH - 110, tw + 24, 22);
+        ctx.fillStyle = C.textHi;
+        ctx.fillText(txt, VW/2, VH - 94);
+        ctx.textAlign = 'left';
+    }
+
+    ctx.font = '10px monospace';
+    ctx.fillStyle = 'rgba(100,100,130,0.5)';
+    ctx.fillText('WASD/Arrows:Move  E/Click:Interact  1-5:Items', 8, VH - 6);
+}
+
+function renderMinimap() {
+    var scale = 3;
+    var mx = VW - MW * scale - 12;
+    var my = 8;
+    ctx.fillStyle = 'rgba(10,10,20,0.85)';
+    ctx.fillRect(mx - 3, my - 3, MW * scale + 6, MH * scale + 6);
+    ctx.strokeStyle = C.uiBorder;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(mx - 3, my - 3, MW * scale + 6, MH * scale + 6);
+    for (var y = 0; y < MH; y++) {
+        for (var x = 0; x < MW; x++) {
+            var door = getDoorAt(x, y);
+            if (door) {
+                ctx.fillStyle = door.open ? '#44aa66' : '#ddaa44';
+            } else {
+                ctx.fillStyle = tileMap[y][x] === 1 ? '#1a1a2a' : '#3a3a55';
+            }
+            ctx.fillRect(mx + x * scale, my + y * scale, scale, scale);
+        }
+    }
+    var ptx = Math.floor((player.x + player.w/2) / T);
+    var pty = Math.floor((player.y + player.h/2) / T);
+    ctx.fillStyle = C.player;
+    ctx.fillRect(mx + ptx * scale - 1, my + pty * scale - 1, scale + 2, scale + 2);
+    ctx.fillStyle = C.exitDoor;
+    ctx.fillRect(mx + 38 * scale - 1, my + 29 * scale - 1, scale + 2, scale + 2);
+}
+
+function renderMessages() {
+    var mx = 10, my = VH - 118;
+    ctx.font = '12px monospace';
+    for (var i = 0; i < messages.length; i++) {
+        var alpha = 0.5 + 0.5 * ((i + 1) / messages.length);
+        ctx.fillStyle = 'rgba(180,180,200,' + alpha + ')';
+        ctx.fillText(messages[i], mx, my + i * 16);
+    }
+}
+
+function renderInventory() {
+    var slotSize = 60;
+    var gap = 8;
+    var totalW = 5 * slotSize + 4 * gap;
+    var startX = (VW - totalW) / 2;
+    var startY = VH - 78;
+
+    ctx.fillStyle = C.uiBg;
+    ctx.fillRect(startX - 8, startY - 8, totalW + 16, slotSize + 16);
+    ctx.strokeStyle = C.uiBorder;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(startX - 8, startY - 8, totalW + 16, slotSize + 16);
+
+    ctx.font = '9px monospace';
+    ctx.fillStyle = C.textDim;
+    ctx.textAlign = 'center';
+    ctx.fillText('INVENTORY', VW / 2, startY - 1);
+    ctx.textAlign = 'left';
+
+    for (var i = 0; i < 5; i++) {
+        var sx = startX + i * (slotSize + gap);
+        ctx.fillStyle = (selectedSlot === i) ? 'rgba(68,221,170,0.15)' : C.uiSlot;
+        ctx.fillRect(sx, startY, slotSize, slotSize);
+        ctx.strokeStyle = (selectedSlot === i) ? C.highlight : '#3a3a55';
+        ctx.lineWidth = (selectedSlot === i) ? 2 : 1;
+        ctx.strokeRect(sx, startY, slotSize, slotSize);
+        ctx.font = '9px monospace';
+        ctx.fillStyle = C.textDim;
+        ctx.fillText((i + 1).toString(), sx + 3, startY + 11);
+
+        if (inventory[i]) {
+            var def = ITEM_DEFS[inventory[i]];
+            drawItemIcon(sx + slotSize/2, startY + slotSize/2 - 4, inventory[i], def.color, 1.2);
+            ctx.font = '8px monospace';
+            ctx.fillStyle = def.color;
+            ctx.textAlign = 'center';
+            var name = def.name.length > 10 ? def.name.substring(0, 9) + '.' : def.name;
+            ctx.fillText(name, sx + slotSize/2, startY + slotSize - 4);
+            ctx.textAlign = 'left';
+        }
+    }
+}
+
+// ============================================================
+// SECTION 16: RENDER - SCREENS & PUZZLES
+// ============================================================
+
+function renderTitleScreen() {
+    ctx.fillStyle = '#08080f';
+    ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = 'rgba(30,30,50,0.3)';
+    for (var y = 0; y < VH; y += T) {
+        for (var x = 0; x < VW; x += T) {
+            if ((Math.floor(x/T) + Math.floor(y/T)) % 3 === 0) {
+                ctx.fillRect(x, y, T, T);
+            }
+        }
+    }
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 52px monospace';
+    ctx.fillStyle = C.highlight;
+    ctx.fillText('OFFICE ESCAPE', VW/2, 180);
+    ctx.font = '16px monospace';
+    ctx.fillStyle = C.textLight;
+    ctx.fillText('Find the USB Keycard and escape the office!', VW/2, 220);
+    ctx.strokeStyle = C.uiBorder;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(VW/2 - 150, 240);
+    ctx.lineTo(VW/2 + 150, 240);
+    ctx.stroke();
+
+    var controls = [
+        'WASD / Arrow Keys -- Move',
+        'E / Left Click -- Interact',
+        '1-5 -- Select inventory item',
+        '0 / ESC -- Deselect item',
+    ];
+    ctx.font = '14px monospace';
+    ctx.fillStyle = C.textDim;
+    for (var i = 0; i < controls.length; i++) {
+        ctx.fillText(controls[i], VW/2, 275 + i * 24);
+    }
+    ctx.font = '12px monospace';
+    ctx.fillStyle = 'rgba(150,150,170,0.6)';
+    ctx.fillText('Search everything. Read notes. Solve puzzles.', VW/2, 390);
+    var blink = Math.sin(Date.now() / 400) > -0.3;
+    if (blink) {
+        ctx.font = 'bold 18px monospace';
+        ctx.fillStyle = C.highlight;
+        ctx.fillText('Press SPACE to start', VW/2, 450);
+    }
+    var time = Date.now() / 2000;
+    for (var i = 0; i < 5; i++) {
+        var angle = time + i * Math.PI * 2 / 5;
+        var dx = Math.cos(angle) * 200;
+        var dy = Math.sin(angle) * 100;
+        ctx.fillStyle = 'rgba(68,221,170,' + (0.03 + 0.02 * Math.sin(time + i)) + ')';
+        ctx.beginPath();
+        ctx.arc(VW/2 + dx, 180 + dy, 40 + i * 10, 0, Math.PI*2);
+        ctx.fill();
+    }
+    ctx.textAlign = 'left';
+}
+
+function renderVictoryScreen() {
+    ctx.fillStyle = 'rgba(5,5,15,0.92)';
+    ctx.fillRect(0, 0, VW, VH);
+    ctx.textAlign = 'center';
+    var time = Date.now() / 1000;
+    for (var i = 0; i < 3; i++) {
+        var r = 100 + i * 60 + Math.sin(time + i) * 20;
+        ctx.fillStyle = 'rgba(221,170,68,' + (0.03 - i*0.008) + ')';
+        ctx.beginPath();
+        ctx.arc(VW/2, 200, r, 0, Math.PI*2);
+        ctx.fill();
+    }
+    ctx.font = 'bold 56px monospace';
+    ctx.fillStyle = C.exitDoor;
+    ctx.fillText('YOU ESCAPED!', VW/2, 200);
+    var mins = Math.floor(elapsedTime / 60);
+    var secs = Math.floor(elapsedTime % 60);
+    var timeStr = (mins < 10 ? '0' : '') + mins + ':' + (secs < 10 ? '0' : '') + secs;
+    ctx.font = '22px monospace';
+    ctx.fillStyle = C.textLight;
+    ctx.fillText('Time: ' + timeStr, VW/2, 260);
+    ctx.font = '14px monospace';
+    ctx.fillStyle = C.textDim;
+    ctx.fillText('Items collected: ' + inventory.length + ' / 5', VW/2, 300);
+    var blink = Math.sin(Date.now() / 400) > -0.3;
+    if (blink) {
+        ctx.font = 'bold 18px monospace';
+        ctx.fillStyle = C.highlight;
+        ctx.fillText('Press SPACE to play again', VW/2, 380);
+    }
+    ctx.textAlign = 'left';
+}
+
+function renderPuzzleOverlay() {
+    if (!puzzleState) return;
+    ctx.fillStyle = C.overlay;
+    ctx.fillRect(0, 0, VW, VH);
+    if (puzzleState.type === 'keypad') renderKeypadPuzzle();
+    else if (puzzleState.type === 'papers') renderPaperPuzzle();
+}
+
+function renderKeypadPuzzle() {
+    var p = puzzleState;
+    var pw = 270, ph = 380;
+    var ox = (VW - pw) / 2, oy = (VH - ph) / 2;
+    ctx.fillStyle = C.puzzleBg;
+    ctx.fillRect(ox, oy, pw, ph);
+    ctx.strokeStyle = C.puzzleBorder;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(ox, oy, pw, ph);
+    ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = C.textLight;
+    ctx.fillText('KEYPAD ENTRY', ox + pw/2, oy + 25);
+    ctx.fillStyle = '#0a0a18';
+    ctx.fillRect(ox + 20, oy + 38, pw - 40, 35);
+    ctx.strokeStyle = '#3a3a5a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(ox + 20, oy + 38, pw - 40, 35);
+    ctx.font = 'bold 24px monospace';
+    ctx.fillStyle = p.error ? '#ff4444' : C.keyBtnHi;
+    var displayText = p.input;
+    if (p.input.length < 4 && !p.error) {
+        displayText += Math.sin(Date.now()/300) > 0 ? '_' : ' ';
+    }
+    ctx.fillText(displayText, ox + pw/2, oy + 63);
+    if (p.error) {
+        ctx.font = '11px monospace';
+        ctx.fillStyle = '#ff6644';
+        ctx.fillText('ACCESS DENIED', ox + pw/2, oy + 82);
+    }
+    var labels = ['1','2','3','4','5','6','7','8','9','CLR','0','ENT'];
+    var bw = 70, bh = 55, gap = 10;
+    var startX = ox + 20, startY = oy + 90;
+    for (var i = 0; i < 12; i++) {
+        var row = Math.floor(i / 3);
+        var col = i % 3;
+        var bx = startX + col * (bw + gap);
+        var by = startY + row * (bh + gap);
+        var isHover = mouse.x >= bx && mouse.x <= bx+bw && mouse.y >= by && mouse.y <= by+bh;
+        if (i === 9) ctx.fillStyle = '#4a2a2a';
+        else if (i === 11) ctx.fillStyle = '#2a4a2a';
+        else ctx.fillStyle = isHover ? C.cardHi : C.keyBtn;
+        ctx.fillRect(bx, by, bw, bh);
+        if (i === 9) ctx.strokeStyle = '#664444';
+        else if (i === 11) ctx.strokeStyle = '#446644';
+        else ctx.strokeStyle = '#5a6a6a';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bx, by, bw, bh);
+        ctx.font = (i === 11) ? 'bold 14px monospace' : 'bold 20px monospace';
+        if (i === 9) ctx.fillStyle = '#ff8888';
+        else if (i === 11) ctx.fillStyle = '#88ff88';
+        else ctx.fillStyle = C.textLight;
+        ctx.fillText(labels[i], bx + bw/2, by + bh/2 + 7);
+    }
+    ctx.font = '10px monospace';
+    ctx.fillStyle = C.textDim;
+    ctx.fillText('Press ESC to cancel', ox + pw/2, oy + ph - 10);
+    ctx.textAlign = 'left';
+}
+
+function renderPaperPuzzle() {
+    var p = puzzleState;
+    var pw = 400, ph = 320;
+    var ox = (VW - pw) / 2, oy = (VH - ph) / 2;
+    ctx.fillStyle = C.puzzleBg;
+    ctx.fillRect(ox, oy, pw, ph);
+    ctx.strokeStyle = C.puzzleBorder;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(ox, oy, pw, ph);
+    ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = C.textLight;
+    ctx.fillText('SORT THE DOCUMENTS', ox + pw/2, oy + 25);
+    ctx.font = '11px monospace';
+    ctx.fillStyle = C.textDim;
+    ctx.fillText('Click pages in order: 1, 2, 3, 4', ox + pw/2, oy + 45);
+    if (p.error) {
+        ctx.fillStyle = 'rgba(200,50,50,0.1)';
+        ctx.fillRect(ox, oy, pw, ph);
+    }
+    var pages = [
+        { num:1, title:'Introduction' },
+        { num:2, title:'Methodology' },
+        { num:3, title:'Results' },
+        { num:4, title:'Conclusion' },
+    ];
+    var cw = 170, ch = 100, gp = 20;
+    var startX = ox + (pw - 2*cw - gp) / 2;
+    var startY = oy + 60;
+    for (var i = 0; i < 4; i++) {
+        var col = i % 2, row = Math.floor(i / 2);
+        var cx = startX + col * (cw + gp);
+        var cy = startY + row * (ch + gp);
+        var pageIdx = p.order[i];
+        var page = pages[pageIdx];
+        var isClicked = false;
+        for (var c = 0; c < p.clicked.length; c++) {
+            if (p.clicked[c] === page.num) { isClicked = true; break; }
+        }
+        var isHover = mouse.x >= cx && mouse.x <= cx+cw && mouse.y >= cy && mouse.y <= cy+ch;
+        if (isClicked) ctx.fillStyle = C.cardCorrect;
+        else if (p.error) ctx.fillStyle = C.cardWrong;
+        else ctx.fillStyle = isHover ? C.cardHi : C.cardBg;
+        ctx.fillRect(cx, cy, cw, ch);
+        ctx.strokeStyle = isClicked ? '#44aa66' : '#4a4a6a';
+        ctx.lineWidth = isClicked ? 2 : 1;
+        ctx.strokeRect(cx, cy, cw, ch);
+        ctx.font = 'bold 28px monospace';
+        ctx.fillStyle = isClicked ? '#66cc88' : C.textDim;
+        ctx.textAlign = 'left';
+        ctx.fillText(page.num.toString(), cx + 10, cy + 35);
+        ctx.font = '11px monospace';
+        ctx.fillStyle = isClicked ? '#88ddaa' : C.textLight;
+        ctx.fillText('Page ' + page.num + '/4', cx + 10, cy + 55);
+        ctx.font = 'bold 13px monospace';
+        ctx.fillText(page.title, cx + 10, cy + 78);
+        if (isClicked) {
+            ctx.font = 'bold 20px monospace';
+            ctx.fillStyle = '#44ff66';
+            ctx.textAlign = 'right';
+            ctx.fillText('OK', cx + cw - 10, cy + 35);
+            ctx.textAlign = 'left';
+        }
+    }
+    if (p.solved) {
+        ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = C.highlight;
+        ctx.fillText('Documents sorted! Click to continue.', ox + pw/2, oy + ph - 15);
+    } else {
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = C.textDim;
+        ctx.fillText('Press ESC to cancel', ox + pw/2, oy + ph - 10);
+    }
+    ctx.textAlign = 'left';
+}
+
+// ============================================================
+// SECTION 17: GAME LOOP
+// ============================================================
+
+var lastTime = 0;
+
+function gameLoop(timestamp) {
+    var dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+    lastTime = timestamp;
+
+    if (state === 'playing') {
+        updatePlayer(dt);
+        updateCamera();
+        nearbyObj = findNearby();
+        for (var i = particles.length - 1; i >= 0; i--) {
+            particles[i].life -= dt;
+            if (particles[i].life <= 0) particles.splice(i, 1);
+        }
+        if (screenShake > 0) screenShake -= dt;
+        if (mouse.clicked) {
+            handleMouseClick();
+            mouse.clicked = false;
+        }
+    } else if (state === 'puzzle') {
+        if (puzzleState && puzzleState.errorTimer > 0) {
+            puzzleState.errorTimer -= dt;
+            if (puzzleState.errorTimer <= 0) puzzleState.error = false;
+        }
+        if (mouse.clicked) {
+            handleMouseClick();
+            mouse.clicked = false;
+        }
+    } else {
+        mouse.clicked = false;
+    }
+
+    ctx.clearRect(0, 0, VW, VH);
+    if (state === 'title') {
+        renderTitleScreen();
+    } else if (state === 'victory') {
+        renderWorld();
+        renderVictoryScreen();
+    } else {
+        renderWorld();
+        if (state === 'puzzle') renderPuzzleOverlay();
+    }
+    requestAnimationFrame(gameLoop);
+}
+
+function renderWorld() {
+    ctx.save();
+    if (screenShake > 0) {
+        var shakeAmt = screenShake * 20;
+        ctx.translate(
+            (Math.random() - 0.5) * shakeAmt,
+            (Math.random() - 0.5) * shakeAmt
+        );
+    }
+    renderMap();
+    renderInteractPoints();
+    renderFurniture();
+    renderItems();
+    renderPlayer();
+    renderParticles();
+    ctx.restore();
+    renderLighting();
+    renderUI();
+}
+
+// ============================================================
+// SECTION 18: INITIALIZATION
+// ============================================================
+
+function initGame() {
+    buildMap();
+    initDoors();
+    initFurniture();
+    initItems();
+    initInteractPoints();
+    player.x = 6 * T + (T - PS) / 2;
+    player.y = 20 * T + (T - PS) / 2;
+    player.facing = 'down';
+    player.moving = false;
+    inventory = [];
+    selectedSlot = -1;
+    messages = [];
+    puzzleState = null;
+    particles = [];
+    screenShake = 0;
+    nearbyObj = null;
+    tileMap[23][13] = 0;
+    updateCamera();
+}
+
+function startGame() {
+    initGame();
+    state = 'playing';
+    startTime = Date.now();
+    elapsedTime = 0;
+    addMessage('You wake up in the office. Find a way out!');
+    addMessage('Search the room for useful items.');
+}
+
+initGame();
+requestAnimationFrame(gameLoop);
+
+</script>
+</body>
+</html>
